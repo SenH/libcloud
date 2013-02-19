@@ -52,7 +52,7 @@ class NimbusConnection(ConnectionUserAndKey):
         self.id = kwargs.pop('id')
         super(NimbusConnection, self).__init__(*args, **kwargs)
 
-    def pre_connect_hook(self, params, headers):
+    def pre_connect_hook(self, params, headers, data):
         timestamp = str(int(time.time()))
         signature = self._calculate_signature(user_id=self.user_id,
                                               method=self.method,

@@ -90,7 +90,7 @@ class S3RawResponse(S3Response, RawResponse):
 
 class S3Connection(ConnectionUserAndKey):
     """
-    Repersents a single connection to the EC2 Endpoint
+    Represents a single connection to S3
     """
 
     host = 's3.amazonaws.com'
@@ -103,7 +103,7 @@ class S3Connection(ConnectionUserAndKey):
         params['Expires'] = expires
         return params
 
-    def pre_connect_hook(self, params, headers):
+    def pre_connect_hook(self, params, headers, data):
         params['Signature'] = self._get_aws_auth_param(
             method=self.method, headers=headers, params=params,
             expires=params['Expires'], secret_key=self.key, path=self.action)

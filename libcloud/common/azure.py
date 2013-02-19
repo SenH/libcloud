@@ -89,7 +89,7 @@ class AzureConnection(ConnectionUserAndKey):
     def add_default_params(self, params):
         return params
 
-    def pre_connect_hook(self, params, headers):
+    def pre_connect_hook(self, params, headers, data):
         headers = copy.deepcopy(headers)
 
         # We have to add a date header in GMT

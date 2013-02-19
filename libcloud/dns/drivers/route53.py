@@ -66,7 +66,7 @@ class Route53Connection(ConnectionUserAndKey):
     host = API_HOST
     responseCls = Route53DNSResponse
 
-    def pre_connect_hook(self, params, headers):
+    def pre_connect_hook(self, params, headers, data):
         time_string = datetime.datetime.utcnow() \
                               .strftime('%a, %d %b %Y %H:%M:%S GMT')
         headers['Date'] = time_string

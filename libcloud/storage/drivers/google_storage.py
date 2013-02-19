@@ -50,7 +50,7 @@ class GoogleStorageConnection(ConnectionUserAndKey):
         headers['Date'] = date
         return headers
 
-    def pre_connect_hook(self, params, headers):
+    def pre_connect_hook(self, params, headers, data):
         signature = self._get_aws_auth_param(method=self.method,
                                              headers=headers,
                                              params=params,

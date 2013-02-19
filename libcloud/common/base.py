@@ -572,7 +572,7 @@ class Connection(object):
         if data is not None:
             headers.update({'Content-Length': str(len(data))})
 
-        params, headers = self.pre_connect_hook(params, headers)
+        params, headers = self.pre_connect_hook(params, headers, data)
 
         if params:
             if '?' in action:
@@ -631,7 +631,7 @@ class Connection(object):
         """
         return headers
 
-    def pre_connect_hook(self, params, headers):
+    def pre_connect_hook(self, params, headers, data):
         """
         A hook which is called before connecting to the remote server.
         This hook can perform a final manipulation on the params, headers and
@@ -642,6 +642,9 @@ class Connection(object):
 
         @type headers: C{dict}
         @param headers: Request headers.
+
+        @type data: C{str}
+        @param data: The request data
         """
         return params, headers
 

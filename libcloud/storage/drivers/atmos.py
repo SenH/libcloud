@@ -84,7 +84,7 @@ class AtmosConnection(ConnectionUserAndKey):
 
         return headers
 
-    def pre_connect_hook(self, params, headers):
+    def pre_connect_hook(self, params, headers, data):
         headers['x-emc-signature'] = self._calculate_signature(params, headers)
 
         return params, headers

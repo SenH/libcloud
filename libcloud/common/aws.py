@@ -139,3 +139,117 @@ class SignedAWSConnection(ConnectionUserAndKey):
         )
 
         return b64_hmac.decode('utf-8')
+
+
+class SignedAWSConnectionV4(ConnectionUserAndKey):
+    """
+    Represents a single connection to AWS using signed auth v4
+    """
+
+    host_template = '%s.%s.amazonaws.com'
+    region = None
+    service = None
+    version = 'aws4_request'
+    algorithm = 'AWS4-HMAC-SHA256'
+
+    def __init__(self, user_id, key, secure=True,
+                 host=None, port=None, url=None, timeout=None):
+
+        # Prepare the host template
+        self.host = self.host_template % (self.service, self.region)
+
+        # Initialize the host connection
+        super(SignedAWSConnectionV4, self).__init__(user_id, key, secure,
+                                                    host, port, url, timeout)
+
+    def add_default_params(self, params):
+        params['Version'] = '2012-11-05'
+        params['Timestamp'] = time.strftime('%Y-%m-%dT%H:%M:%SZ',
+                                            time.gmtime())
+        return params
+
+    def pre_connect_hook(self, params, headers, data):
+        """
+        Authorization = Algorithm + '\n' +
+            Credential + '\n' +
+            SignedHeaders + '\n' +
+            Signature
+
+        where
+        Signature = URL-Encode( Base64( HMAC-SHA1( YourSecretAccessKeyID,
+                                    UTF-8-Encoding-Of( StringToSign ) ) ) );
+
+        StringToSign = Algorithm + '\n' +
+            RequestDate + '\n' +
+            CredentialScope + '\n' +
+            HexEncode(Hash(CanonicalRequest))
+
+        where
+        CanonicalRequest = HTTP-VERB + "\n" +
+            CanonicalizedURI + "\n" +
+            CanonicalizedQueryString + "\n" +
+            CanonicalizedHeaders + "\n" +
+            SignedHeaders + '\n' +
+            HexEncode(Hash(Payload))
+        """
+
+        # Start making the canonical request
+        buf = [self.method, self.action]
+
+        query_keys = params.keys()
+        query_keys.sort()
+        pairs = []
+
+        for key in query_keys:
+            pairs.append(urlquote(key, safe='') + '=' +
+                         urlquote(str(params[key]), safe='-_~'))
+
+        buf.append('&'.join(pairs))
+
+        headers_copy = {}
+
+        for key, value in headers.items():
+            headers_copy[key.lower()] = str(value).strip()
+
+        header_keys = headers_copy.keys()
+        header_keys.sort()
+        canonical_headers = []
+
+        for key in header_keys:
+            value = headers_copy[key]
+            canonical_headers.append('%s:%s' % (key, value))
+
+        signed_headers = ';'.join(header_keys)
+        buf.append('\n'.join(canonical_headers))
+        buf.append('')
+        buf.append(signed_headers)
+        buf.append(sha256(b(data)).hexdigest())
+
+        canonical_request = '\n'.join(buf)
+
+        # Lets get a string to sign
+        datetime = params['Timestamp'].replace('-', '').replace(':', '')
+        date = datetime.split('T')[0]
+        scope = '%s/%s/%s/%s' % (date, self.region, self.service, self.version)
+
+        buf = [self.algorithm, datetime, scope]
+        buf.append(sha256(b(canonical_request)).hexdigest())
+
+        to_sign = '\n'.join(buf)
+        derived = b('AWS4' + self.key)
+
+        for value in [date, self.region, self.service, self.version, to_sign]:
+            signature = hmac.new(derived, b(value), digestmod=sha256)
+            derived = b(signature.digest())
+
+        signature = 'Signature=%s' % (signature.hexdigest().decode('utf-8'))
+        credential = 'Credential=%s/%s,' % (self.user_id, scope)
+        signed_headers = 'SignedHeaders=%s,' % (signed_headers)
+
+        auth = [self.algorithm, credential, signed_headers, signature]
+
+        # Add the authorization headers
+        headers['Authorization'] = ' '.join(auth)
+        headers['Date'] = params['Timestamp']
+
+        return params, headers
