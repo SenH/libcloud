@@ -2,6 +2,27 @@
 
 Changes with Apache Libcloud in development:
 
+ *) Compute
+
+    - Fix a regression in Softlayer driver caused by the xmlrpclib changes.
+      (LIBCLOUD-310)
+      [Jason Johnson]
+
+    - Allow user to pass alternate ssh usernames to deploy_node
+      (ssh_alternate_usernames kwarg) which are used for authentication if the
+      default one doesn't work. (LIBCLOUD-309)
+      [Chris Psaltis, Tomaz Muraus]
+
+    - Fix a bug in EC2 list_locations method - 'name' attribute didn't contain a
+      the right value.
+      [Tomaz Muraus]
+
+    - Add new ScriptFileDeployment deployment class which reads deploy script
+      from a file.
+      [Rudolf J Streif]
+
+Changes with Apache Libcloud 0.12.3:
+
   *) General
 
     - Fix Python 3.x related regressions. (LIBCLOUD-245)
