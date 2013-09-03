@@ -23,8 +23,6 @@ except ImportError:
 
 import warnings
 
-from itertools import chain
-
 from libcloud.utils.py3 import httplib
 from libcloud.utils.py3 import b
 from libcloud.utils.py3 import next
@@ -36,10 +34,10 @@ from xml.etree import ElementTree as ET
 
 from libcloud.common.openstack import OpenStackBaseConnection
 from libcloud.common.openstack import OpenStackDriverMixin
-from libcloud.common.types import MalformedResponseError
+from libcloud.common.types import MalformedResponseError, ProviderError
 from libcloud.compute.types import NodeState, Provider
 from libcloud.compute.base import NodeSize, NodeImage
-from libcloud.compute.base import NodeDriver, Node, NodeLocation
+from libcloud.compute.base import NodeDriver, Node, NodeLocation, StorageVolume
 from libcloud.pricing import get_size_price
 from libcloud.common.base import Response
 from libcloud.utils.xml import findall
@@ -53,12 +51,18 @@ __all__ = [
     'OpenStack_1_1_Response',
     'OpenStack_1_1_Connection',
     'OpenStack_1_1_NodeDriver',
+    'OpenStack_1_1_FloatingIpPool',
+    'OpenStack_1_1_FloatingIpAddress',
     'OpenStackNodeDriver'
 ]
 
 ATOM_NAMESPACE = "http://www.w3.org/2005/Atom"
 
 DEFAULT_API_VERSION = '1.1'
+
+
+class OpenStackException(ProviderError):
+    pass
 
 
 class OpenStackResponse(Response):
@@ -208,6 +212,69 @@ class OpenStackNodeDriver(NodeDriver, OpenStackDriverMixin):
         return self._to_nodes(
             self.connection.request('/servers/detail').object)
 
+    def create_volume(self, size, name, location=None, snapshot=None):
+        if snapshot:
+            raise NotImplementedError(
+                "create_volume does not yet support create from snapshot")
+        return self.connection.request('/os-volumes',
+                                       method='POST',
+                                       data={
+                                           'volume': {
+                                               'display_name': name,
+                                               'display_description': name,
+                                               'size': size,
+                                               'volume_type': None,
+                                               'metadata': {
+                                                   'contents': name,
+                                               },
+                                               'availability_zone': location,
+                                           }
+                                       }).success()
+
+    def destroy_volume(self, volume):
+        return self.connection.request('/os-volumes/%s' % volume.id,
+                                       method='DELETE').success()
+
+    def attach_volume(self, node, volume, device="auto"):
+        # when "auto" or None is provided for device, openstack will let
+        # the guest OS pick the next available device (fi. /dev/vdb)
+        return self.connection.request(
+            '/servers/%s/os-volume_attachments' % node.id,
+            method='POST',
+            data={
+                'volumeAttachment': {
+                    'volumeId': volume.id,
+                    'device': device,
+                }
+            }).success()
+
+    def detach_volume(self, volume, ex_node=None):
+        # when ex_node is not provided, volume is detached from all nodes
+        failed_nodes = []
+        for attachment in volume.extra['attachments']:
+            if not ex_node or ex_node.id == attachment['serverId']:
+                response = self.connection.request(
+                    '/servers/%s/os-volume_attachments/%s' %
+                    (attachment['serverId'], attachment['id']),
+                    method='DELETE')
+
+                if not response.success():
+                    failed_nodes.append(attachment['serverId'])
+        if failed_nodes:
+            raise OpenStackException(
+                'detach_volume failed for nodes with id: %s' %
+                ', '.join(failed_nodes), 500, self
+            )
+        return True
+
+    def list_volumes(self):
+        return self._to_volumes(
+            self.connection.request('/os-volumes').object)
+
+    def ex_get_volume(self, volumeId):
+        return self._to_volume(
+            self.connection.request('/os-volumes/%s' % volumeId).object)
+
     def list_images(self, location=None, ex_only_active=True):
         """
         @inherits: L{NodeDriver.list_images}
@@ -272,6 +339,30 @@ class OpenStackNodeDriver(NodeDriver, OpenStackDriverMixin):
         return self._reboot_node(node, reboot_type='HARD')
 
 
+class OpenStackNodeSize(NodeSize):
+    """
+    NodeSize class for the OpenStack.org driver.
+
+    Following the example of OpenNebula.org driver
+    and following guidelines:
+    https://issues.apache.org/jira/browse/LIBCLOUD-119
+    """
+
+    def __init__(self, id, name, ram, disk, bandwidth, price, driver,
+                 vcpus=None):
+        super(OpenStackNodeSize, self).__init__(id=id, name=name, ram=ram,
+                                                disk=disk,
+                                                bandwidth=bandwidth,
+                                                price=price, driver=driver)
+        self.vcpus = vcpus
+
+    def __repr__(self):
+        return (('<OpenStackNodeSize: id=%s, name=%s, ram=%s, disk=%s, '
+                 'bandwidth=%s, price=%s, driver=%s, vcpus=%s,  ...>')
+                % (self.id, self.name, self.ram, self.disk, self.bandwidth,
+                   self.price, self.driver.name, self.vcpus))
+
+
 class OpenStack_1_0_Response(OpenStackResponse):
     def __init__(self, *args, **kwargs):
         # done because of a circular reference from
@@ -300,7 +391,7 @@ class OpenStack_1_0_NodeDriver(OpenStackNodeDriver):
     connectionCls = OpenStack_1_0_Connection
     type = Provider.OPENSTACK
 
-    features = {"create_node": ["generates_password"]}
+    features = {'create_node': ['generates_password']}
 
     def __init__(self, *args, **kwargs):
         self._ex_force_api_version = str(kwargs.pop('ex_force_api_version',
@@ -673,7 +764,7 @@ class OpenStack_1_0_NodeDriver(OpenStackNodeDriver):
         @param       node_id: ID of the node which should be used
         @type        node_id: C{str}
 
-        @rtype: C{bool}
+        @rtype: C{OpenStack_1_0_NodeIpAddresses}
         """
         # @TODO: Remove this if in 0.6
         if isinstance(node_id, Node):
@@ -769,15 +860,17 @@ class OpenStack_1_0_NodeDriver(OpenStackNodeDriver):
         return [self._to_size(el) for el in elements]
 
     def _to_size(self, el):
-        return NodeSize(id=el.get('id'),
-                        name=el.get('name'),
-                        ram=int(el.get('ram')),
-                        disk=int(el.get('disk')),
-                        # XXX: needs hardcode
-                        bandwidth=None,
-                        # Hardcoded
-                        price=self._get_size_price(el.get('id')),
-                        driver=self.connection.driver)
+        vcpus = int(el.get('vcpus')) if el.get('vcpus', None) else None
+        return OpenStackNodeSize(id=el.get('id'),
+                                 name=el.get('name'),
+                                 ram=int(el.get('ram')),
+                                 disk=int(el.get('disk')),
+                                 # XXX: needs hardcode
+                                 vcpus=vcpus,
+                                 bandwidth=None,
+                                 # Hardcoded
+                                 price=self._get_size_price(el.get('id')),
+                                 driver=self.connection.driver)
 
     def ex_limits(self):
         """
@@ -1092,7 +1185,8 @@ class OpenStack_1_1_NodeDriver(OpenStackNodeDriver):
         server_object = server_resp.object['server']
 
         # adminPass is not always present
-        # http://docs.openstack.org/essex/openstack-compute/admin/content/configuring-compute-API.html#d6e1833
+        # http://docs.openstack.org/essex/openstack-compute/admin/
+        # content/configuring-compute-API.html#d6e1833
         server_object['adminPass'] = create_response.get('adminPass', None)
 
         return self._to_node(server_object)
@@ -1127,6 +1221,10 @@ class OpenStack_1_1_NodeDriver(OpenStackNodeDriver):
     def _to_nodes(self, obj):
         servers = obj['servers']
         return [self._to_node(server) for server in servers]
+
+    def _to_volumes(self, obj):
+        volumes = obj['volumes']
+        return [self._to_volume(volume) for volume in volumes]
 
     def _to_sizes(self, obj):
         flavors = obj['flavors']
@@ -1618,6 +1716,7 @@ class OpenStack_1_1_NodeDriver(OpenStackNodeDriver):
             driver=self,
             extra=dict(
                 hostId=api_node['hostId'],
+                access_ip=api_node.get('accessIPv4'),
                 # Docs says "tenantId", but actual is "tenant_id". *sigh*
                 # Best handle both.
                 tenantId=api_node.get('tenant_id') or api_node['tenantId'],
@@ -1633,17 +1732,32 @@ class OpenStack_1_1_NodeDriver(OpenStackNodeDriver):
             ),
         )
 
+    def _to_volume(self, api_node):
+        if 'volume' in api_node:
+            api_node = api_node['volume']
+        return StorageVolume(
+            id=api_node['id'],
+            name=api_node['displayName'],
+            size=api_node['size'],
+            driver=self,
+            extra={
+                'description': api_node['displayDescription'],
+                'attachments': [att for att in api_node['attachments'] if att],
+            }
+        )
+
     def _to_size(self, api_flavor, price=None, bandwidth=None):
         # if provider-specific subclasses can get better values for
         # price/bandwidth, then can pass them in when they super().
         if not price:
             price = self._get_size_price(str(api_flavor['id']))
 
-        return NodeSize(
+        return OpenStackNodeSize(
             id=api_flavor['id'],
             name=api_flavor['name'],
             ram=api_flavor['ram'],
             disk=api_flavor['disk'],
+            vcpus=api_flavor['vcpus'],
             bandwidth=bandwidth,
             price=price,
             driver=self,
@@ -1696,3 +1810,152 @@ class OpenStack_1_1_NodeDriver(OpenStackNodeDriver):
         """
         resp = self._node_action(node, 'unrescue')
         return resp.status == httplib.ACCEPTED
+
+    def _to_floating_ip_pools(self, obj):
+        pool_elements = obj['floating_ip_pools']
+        return [self._to_floating_ip_pool(pool) for pool in pool_elements]
+
+    def _to_floating_ip_pool(self, obj):
+        return OpenStack_1_1_FloatingIpPool(obj['name'], self.connection)
+
+    def ex_list_floating_ip_pools(self):
+        """
+        List available floating IP pools
+
+        @rtype: C{list} of L{OpenStack_1_1_FloatingIpPool}
+        """
+        return self._to_floating_ip_pools(
+            self.connection.request('/os-floating-ip-pools').object)
+
+    def ex_attach_floating_ip_to_node(self, node, ip):
+        """
+        Attach the floating IP to the node
+
+        @param      node: node
+        @type       node: L{Node}
+
+        @param      ip: floating IP to attach
+        @type       ip: C{str} or L{OpenStack_1_1_FloatingIpAddress}
+
+        @rtype: C{bool}
+        """
+        address = ip.ip_address if hasattr(ip, 'ip_address') else ip
+        data = {
+            'addFloatingIp': {'address': address}
+        }
+        resp = self.connection.request('/servers/%s/action' % node.id,
+                                       method='POST', data=data)
+        return resp.status == httplib.ACCEPTED
+
+    def ex_detach_floating_ip_from_node(self, node, ip):
+        """
+        Detach the floating IP from the node
+
+        @param      node: node
+        @type       node: L{Node}
+
+        @param      ip: floating IP to remove
+        @type       ip: C{str} or L{OpenStack_1_1_FloatingIpAddress}
+
+        @rtype: C{bool}
+        """
+        address = ip.ip_address if hasattr(ip, 'ip_address') else ip
+        data = {
+            'removeFloatingIp': {'address': address}
+        }
+        resp = self.connection.request('/servers/%s/action' % node.id,
+                                       method='POST', data=data)
+        return resp.status == httplib.ACCEPTED
+
+
+class OpenStack_1_1_FloatingIpPool(object):
+    """
+    Floating IP Pool info.
+    """
+
+    def __init__(self, name, connection):
+        self.name = name
+        self.connection = connection
+
+    def list_floating_ips(self):
+        """
+        List floating IPs in the pool
+
+        @rtype: C{list} of L{OpenStack_1_1_FloatingIpAddress}
+        """
+        return self._to_floating_ips(
+            self.connection.request('/os-floating-ips').object)
+
+    def _to_floating_ips(self, obj):
+        ip_elements = obj['floating_ips']
+        return [self._to_floating_ip(ip) for ip in ip_elements]
+
+    def _to_floating_ip(self, obj):
+        return OpenStack_1_1_FloatingIpAddress(obj['id'], obj['ip'], self,
+                                               obj['instance_id'])
+
+    def get_floating_ip(self, ip):
+        """
+        Get specified floating IP from the pool
+
+        @param      ip: floating IP to remove
+        @type       ip: C{str}
+
+        @rtype: L{OpenStack_1_1_FloatingIpAddress}
+        """
+        ip_obj, = [x for x in self.list_floating_ips() if x.ip_address == ip]
+        return ip_obj
+
+    def create_floating_ip(self):
+        """
+        Create new floating IP in the pool
+
+        @rtype: L{OpenStack_1_1_FloatingIpAddress}
+        """
+        resp = self.connection.request('/os-floating-ips',
+                                       method='POST',
+                                       data={'pool': self.name})
+        data = resp.object['floating_ip']
+        id = data['id']
+        ip_address = data['ip']
+        return OpenStack_1_1_FloatingIpAddress(id, ip_address, self)
+
+    def delete_floating_ip(self, ip):
+        """
+        Delete specified floating IP from the pool
+
+        @param      ip: floating IP to remove
+        @type       ip:L{OpenStack_1_1_FloatingIpAddress}
+
+        @rtype: C{bool}
+        """
+        resp = self.connection.request('/os-floating-ips/%s' % ip.id,
+                                       method='DELETE')
+        return resp.status in (httplib.NO_CONTENT, httplib.ACCEPTED)
+
+    def __repr__(self):
+        return ('<OpenStack_1_1_FloatingIpPool: name=%s>' % self.name)
+
+
+class OpenStack_1_1_FloatingIpAddress(object):
+    """
+    Floating IP info.
+    """
+
+    def __init__(self, id, ip_address, pool, node_id=None):
+        self.id = str(id)
+        self.ip_address = ip_address
+        self.pool = pool
+        self.node_id = node_id
+
+    def delete(self):
+        """
+        Delete this floating IP
+
+        @rtype: C{bool}
+        """
+        return self.pool.delete_floating_ip(self)
+
+    def __repr__(self):
+        return ('<OpenStack_1_1_FloatingIpAddress: id=%s, ip_addr=%s, pool=%s>'
+                % (self.id, self.ip_address, self.pool))

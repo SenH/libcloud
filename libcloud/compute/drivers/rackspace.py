@@ -22,8 +22,7 @@ from libcloud.compute.drivers.openstack import OpenStack_1_0_Connection,\
 from libcloud.compute.drivers.openstack import OpenStack_1_1_Connection,\
     OpenStack_1_1_NodeDriver
 
-from libcloud.common.rackspace import (
-    AUTH_URL_US, AUTH_URL_UK)
+from libcloud.common.rackspace import AUTH_URL_US, AUTH_URL_UK
 
 
 ENDPOINT_ARGS_MAP = {
@@ -33,9 +32,15 @@ ENDPOINT_ARGS_MAP = {
     'ord': {'service_type': 'compute',
             'name': 'cloudServersOpenStack',
             'region': 'ORD'},
+    'iad': {'service_type': 'compute',
+            'name': 'cloudServersOpenStack',
+            'region': 'IAD'},
     'lon': {'service_type': 'compute',
             'name': 'cloudServersOpenStack',
-            'region': 'LON'}
+            'region': 'LON'},
+    'syd': {'service_type': 'compute',
+            'name': 'cloudServersOpenStack',
+            'region': 'SYD'},
 }
 
 
@@ -143,29 +148,29 @@ class RackspaceNodeDriver(OpenStack_1_1_NodeDriver):
     api_name = None
 
     def __init__(self, key, secret=None, secure=True, host=None, port=None,
-                 datacenter='dfw', **kwargs):
+                 region='dfw', **kwargs):
         """
         @inherits:  L{NodeDriver.__init__}
 
-        @param datacenter: Datacenter ID which should be used
-        @type datacenter: C{str}
+        @param region: ID of the region which should be used.
+        @type region: C{str}
         """
+        valid_regions = ENDPOINT_ARGS_MAP.keys()
+        if region not in valid_regions:
+            raise ValueError('Invalid region: %s' % (region))
 
-        if datacenter not in ['dfw', 'ord', 'lon']:
-            raise ValueError('Invalid datacenter: %s' % (datacenter))
-
-        if datacenter in ['dfw', 'ord']:
-            self.connectionCls.auth_url = AUTH_URL_US
-            self.api_name = 'rackspacenovaus'
-        elif datacenter == 'lon':
+        if region == 'lon':
             self.connectionCls.auth_url = AUTH_URL_UK
             self.api_name = 'rackspacenovalon'
+        else:
+            self.connectionCls.auth_url = AUTH_URL_US
+            self.api_name = 'rackspacenovaus'
 
         self.connectionCls._auth_version = '2.0'
         self.connectionCls.get_endpoint_args = \
-            ENDPOINT_ARGS_MAP[datacenter]
+            ENDPOINT_ARGS_MAP[region]
 
-        self.datacenter = datacenter
+        self.region = region
 
         super(RackspaceNodeDriver, self).__init__(key=key, secret=secret,
                                                   secure=secure, host=host,
